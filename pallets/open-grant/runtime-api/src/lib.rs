@@ -11,7 +11,7 @@ use pallet_open_grant::{Project};
 // Here we declare the runtime API. It is implemented it the `impl` block in
 // runtime amalgamator file (the `runtime/src/lib.rs`)
 sp_api::decl_runtime_apis! {
-	pub trait OpenGrantApi<AccountId> where AccountId: Codec + MaybeDisplay {
-		fn get_projects() -> Vec<Project<AccountId>>;
+	pub trait OpenGrantApi<AccountId, BlockNumber> where AccountId: Codec + MaybeDisplay,  BlockNumber: Codec + MaybeDisplay {
+		fn get_projects() -> Vec<Project<AccountId, BlockNumber>>;
 	}
 }

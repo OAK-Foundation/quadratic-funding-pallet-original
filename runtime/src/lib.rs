@@ -643,8 +643,8 @@ impl_runtime_apis! {
 	}
 
 	// Here we implement our custom runtime API.
-	impl open_grant_runtime_api::OpenGrantApi<Block, AccountId> for Runtime {
-		fn get_projects() -> Vec<pallet_open_grant::Project<AccountId>> {
+	impl open_grant_runtime_api::OpenGrantApi<Block, AccountId, BlockNumber> for Runtime {
+		fn get_projects() -> Vec<pallet_open_grant::Project<AccountId, BlockNumber>> {
 			// This Runtime API calls into a specific pallet. Calling a pallet is a common
 			// design pattern. You can see most other APIs in this file do the same.
 			// It is also possible to write your logic right here in the runtime

@@ -35,16 +35,17 @@ impl<C, M> OpenGrant<C, M> {
 	}
 }
 
-impl<C, Block, AccountId> OpenGrantApi<<Block as BlockT>::Hash, Vec<Project<AccountId>>> for OpenGrant<C, Block>
+impl<C, Block, AccountId, BlockNumber> OpenGrantApi<<Block as BlockT>::Hash, Vec<Project<AccountId, BlockNumber>>> for OpenGrant<C, Block>
 where
 	Block: BlockT,
 	C: Send + Sync + 'static,
 	C: ProvideRuntimeApi<Block>,
 	C: HeaderBackend<Block>,
-	C::Api: OpenGrantRuntimeApi<Block, AccountId>,
+	C::Api: OpenGrantRuntimeApi<Block, AccountId, BlockNumber>,
 	AccountId: Clone + Codec + MaybeDisplay,
+	BlockNumber:  Clone + Codec + MaybeDisplay,
 {
-	fn get_projects(&self, at: Option<<Block as BlockT>::Hash>) -> Result<Vec<Project<AccountId>>> {
+	fn get_projects(&self, at: Option<<Block as BlockT>::Hash>) -> Result<Vec<Project<AccountId, BlockNumber>>> {
 		let api = self.client.runtime_api();
 		let at = BlockId::hash(at.unwrap_or_else(||
 			// If the block hash is not supplied assume the best block.
