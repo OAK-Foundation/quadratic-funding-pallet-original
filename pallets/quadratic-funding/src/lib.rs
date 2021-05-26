@@ -2,161 +2,129 @@
 
 /// Edit this file to define custom logic or remove it if it is not needed.
 /// Learn more about FRAME and the core library of Substrate FRAME pallets:
-/// https://substrate.dev/docs/en/knowledgebase/runtime/frame
+/// <https://substrate.dev/docs/en/knowledgebase/runtime/frame>
 
+#[cfg(feature = "std")]
+use frame_support::traits::GenesisBuild;
 use frame_support::{
-	decl_module, decl_storage, decl_event, decl_error, ensure, traits::Get,
-	codec::{Decode, Encode},
-	traits::{ReservableCurrency, ExistenceRequirement, Currency, WithdrawReasons}
+	pallet_prelude::*, PalletId,
+	traits::{Currency, ReservableCurrency, ExistenceRequirement, WithdrawReasons},
 };
-
-use sp_runtime::{
-	traits::{AccountIdConversion},
-	ModuleId,
-};
-
-use frame_system::{ensure_signed, ensure_root};
+use codec::{Encode, Decode};
 use sp_std::prelude::*;
-use sp_std::{convert::{TryInto}};
 use integer_sqrt::IntegerSquareRoot;
+use sp_runtime::traits::AccountIdConversion;
+pub use weights::WeightInfo;
+pub use pallet::*;
 
-/// Configure the pallet by specifying the parameters and types on which it depends.
-pub trait Config: frame_system::Config + pallet_identity::Config {
-	// used to generate sovereign account
-	// refer: https://github.com/paritytech/substrate/blob/743accbe3256de2fc615adcaa3ab03ebdbbb4dbd/frame/treasury/src/lib.rs#L92
-	type ModuleId: Get<ModuleId>;
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+pub mod weights;
 
-	/// The currency in which the crowdfunds will be denominated
-	type Currency: ReservableCurrency<Self::AccountId>;
+const MAX_STRING_FIELD_LENGTH: usize = 256;
 
-	/// Because this pallet emits events, it depends on the runtime's definition of an event.
-	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
-}
+#[frame_support::pallet]
+pub mod pallet {
+	use frame_system::pallet_prelude::*;
+	use frame_support::pallet_prelude::*;
+	use super::*;
 
-pub type ProjectIndex = u32;
-pub type RoundIndex = u32;
+	/// Configure the pallet by specifying the parameters and types on which it depends.
+	#[pallet::config]
+	pub trait Config: frame_system::Config + pallet_identity::Config {
+		/// Because this pallet emits events, it depends on the runtime's definition of an event.
+		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 
-type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
-type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
-type ProjectOf<T> = Project<AccountIdOf<T>, <T as frame_system::Config>::BlockNumber>;
-type ContributionOf<T> = Contribution<AccountIdOf<T>, BalanceOf<T>>;
-type RoundOf<T> = Round<AccountIdOf<T>, BalanceOf<T>, <T as frame_system::Config>::BlockNumber>;
-type GrantOf<T> = Grant<AccountIdOf<T>, BalanceOf<T>, <T as frame_system::Config>::BlockNumber>;
+		type PalletId: Get<PalletId>;
 
-/// Round struct
-#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
-pub struct Round<AccountId, Balance, BlockNumber> {
-	start: BlockNumber,
-	end: BlockNumber,
-	matching_fund: Balance,
-	grants: Vec<Grant<AccountId, Balance, BlockNumber>>,
-	is_canceled: bool,
-	is_finalized: bool,
-}
+		type Currency: ReservableCurrency<Self::AccountId>;
 
-impl<AccountId, Balance: From<u32>, BlockNumber: From<u32>> Round<AccountId, Balance, BlockNumber> {
-    fn new(start: BlockNumber, end: BlockNumber, matching_fund: Balance, project_indexes: Vec<ProjectIndex>) -> Round<AccountId, Balance, BlockNumber> { 
-		let mut grant_round  = Round {
-			start: start,
-			end: end,
-			matching_fund: matching_fund,
-			grants: Vec::new(),
-			is_canceled: false,
-			is_finalized: false,
-		};
+		type MaxGrantsPerRound: Get<u32>;
 
-		// Fill in the grants structure in advance
-		for project_index in project_indexes {
-			grant_round.grants.push(Grant {
-				project_index: project_index,
-				contributions: Vec::new(),
-				is_approved: false,
-				is_canceled: false,
-				is_withdrawn: false,
-				withdrawal_expiration: (0 as u32).into(),
-				matching_fund: (0 as u32).into(),
-			});
+		type MaxWithdrawalExpiration: Get<Self::BlockNumber>;
+
+		type WeightInfo: WeightInfo;
+	}
+
+	#[pallet::pallet]
+	#[pallet::generate_store(pub(super) trait Store)]
+	pub struct Pallet<T>(PhantomData<T>);
+
+	#[pallet::storage]
+	#[pallet::getter(fn projects)]
+	pub type Projects<T> = StorageMap<_, Blake2_128Concat, ProjectIndex, Option<ProjectOf<T>>, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn project_count)]
+	pub type ProjectCount<T> = StorageValue<_, ProjectIndex, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn rounds)]
+	pub type Rounds<T> = StorageMap<_, Blake2_128Concat, RoundIndex, Option<RoundOf<T>>, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn round_count)]
+	pub type RoundCount<T> = StorageValue<_, RoundIndex, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn max_grant_count_per_round)]
+	pub type MaxGrantCountPerRound<T> = StorageValue<_, u32, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn withdrawal_expiration)]
+	pub type WithdrawalExpiration<T> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn is_identity_required)]
+	pub type IsIdentityRequired<T> = StorageValue<_, bool, ValueQuery>;
+
+	#[pallet::genesis_config]
+	pub struct GenesisConfig<T: Config> {
+		pub init_max_grant_count_per_round: u32,
+		pub init_withdrawal_expiration: BlockNumberFor<T>,
+		pub init_is_identity_required: bool,
+	}
+
+	#[cfg(feature = "std")]
+	impl<T: Config> Default for GenesisConfig<T> {
+		fn default() -> Self {
+			Self {
+				init_max_grant_count_per_round: Default::default(),
+				init_withdrawal_expiration: Default::default(),
+				init_is_identity_required: Default::default(),
+			}
 		}
-
-		grant_round
 	}
-} 
 
-// Grant in round
-#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
-pub struct Grant<AccountId, Balance, BlockNumber> {
-	project_index: ProjectIndex,
-	contributions: Vec<Contribution<AccountId, Balance>>,
-	is_approved: bool,
-	is_canceled: bool,
-	is_withdrawn: bool,
-	withdrawal_expiration: BlockNumber,
-	matching_fund: Balance,
-}
-
-/// The contribution users made to a grant project.
-#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
-pub struct Contribution<AccountId, Balance> {
-	account_id: AccountId,
-	value: Balance,
-}
-
-/// Project struct
-#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
-#[cfg_attr(feature = "std", derive(serde::Serialize))]
-pub struct Project<AccountId, BlockNumber> {
-	name: Vec<u8>,
-	logo: Vec<u8>,
-	description: Vec<u8>,
-	website: Vec<u8>,
-	/// The account that will receive the funds if the campaign is successful
-	owner: AccountId,
-	create_block_number: BlockNumber,
-}
-
-// The pallet's runtime storage items.
-// https://substrate.dev/docs/en/knowledgebase/runtime/storage
-decl_storage! {
-	// A unique name is used to ensure that the pallet's storage items are isolated.
-	// This name may be updated, but each pallet in the runtime must use a unique name.
-	// ---------------------------------vvvvvvvvvvvvvv
-	trait Store for Module<T: Config> as OpenGrant {
-		// Learn more about declaring storage items:
-		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
-		Projects get(fn grants): map hasher(blake2_128_concat) ProjectIndex => Option<ProjectOf<T>>;
-		ProjectCount get(fn project_count): ProjectIndex;
-
-		Rounds get(fn rounds): map hasher(blake2_128_concat) RoundIndex => Option<RoundOf<T>>;
-		RoundCount get(fn round_count): RoundIndex;
-
-		MaxGrantCountPerRound get(fn max_grant_count_per_round) config(init_max_grant_count_per_round): u32;
-		WithdrawalExpiration get(fn withdrawal_expiration) config(init_withdrawal_expiration): T::BlockNumber;
-
-		IsIdentityRequired get(fn is_identity_required) config(init_is_identity_required): bool;
+	#[pallet::genesis_build]
+	impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
+		fn build(&self) {
+			MaxGrantCountPerRound::<T>::put(self.init_max_grant_count_per_round);
+			WithdrawalExpiration::<T>::put(self.init_withdrawal_expiration);
+			IsIdentityRequired::<T>::put(self.init_is_identity_required);
+		}
 	}
-}
 
-// Pallets use events to inform users when important changes are made.
-// https://substrate.dev/docs/en/knowledgebase/runtime/events
-decl_event!(
-	pub enum Event<T> where Balance = BalanceOf<T>, AccountId = <T as frame_system::Config>::AccountId, <T as frame_system::Config>::BlockNumber {
-		/// Event documentation should end with an array that provides descriptive names for event
-		/// parameters. [something, who]
+	// Pallets use events to inform users when important changes are made.
+	// https://substrate.dev/docs/en/knowledgebase/runtime/events
+	#[pallet::event]
+	#[pallet::metadata(T::AccountId = "AccountId")]
+	#[pallet::generate_deposit(pub(super) fn deposit_event)]
+	pub enum Event<T: Config> {
 		ProjectCreated(ProjectIndex),
 		RoundCreated(RoundIndex),
-		ContributeSucceed(AccountId, ProjectIndex, Balance, BlockNumber),
+		ContributeSucceed(T::AccountId, ProjectIndex, BalanceOf<T>, T::BlockNumber),
 		GrantCanceled(RoundIndex, ProjectIndex),
-		GrantWithdrawn(RoundIndex, ProjectIndex, Balance, Balance),
+		GrantWithdrawn(RoundIndex, ProjectIndex, BalanceOf<T>, BalanceOf<T>),
 		GrantApproved(RoundIndex, ProjectIndex),
 		RoundCanceled(RoundIndex),
 		FundSucceed(),
 		RoundFinalized(RoundIndex),
 	}
-);
 
-// Errors inform users that something went wrong.
-decl_error! {
-	pub enum Error for Module<T: Config> {
+	// Errors inform users that something went wrong.
+	#[pallet::error]
+	pub enum Error<T> {
 		/// Error names should be descriptive.
 		NoneValue,
 		/// Errors should have helpful documentation associated with them.
@@ -187,27 +155,24 @@ decl_error! {
 		WithdrawalExpirationExceed,
 		NotEnoughFund,
 		InvalidProjectIndexes,
+		ParamLimitExceed,
 	}
-}
 
-// Dispatchable functions allows users to interact with the pallet and invoke state changes.
-// These functions materialize as "extrinsics", which are often compared to transactions.
-// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
-decl_module! {
-	pub struct Module<T: Config> for enum Call where origin: T::Origin {
-		// Errors must be initialized if they are used by the pallet.
-		type Error = Error<T>;
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
 
-		// Events must be initialized if they are used by the pallet.
-		fn deposit_event() = default;
-
+	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
+	// These functions materialize as "extrinsics", which are often compared to transactions.
+	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
 		/// Create project
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(2,2)]
-		pub fn create_project(origin, name: Vec<u8>, logo: Vec<u8>, description: Vec<u8>, website: Vec<u8>) {
+		#[pallet::weight(<T as Config>::WeightInfo::create_project())]
+		pub fn create_project(origin: OriginFor<T>, name: Vec<u8>, logo: Vec<u8>, description: Vec<u8>, website: Vec<u8>) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
 			// Check if identity is required
-			let is_identity_needed = IsIdentityRequired::get();
+			let is_identity_needed = IsIdentityRequired::<T>::get();
 			if is_identity_needed {
 				let identity = pallet_identity::Module::<T>::identity(who.clone()).ok_or(Error::<T>::IdentityNeeded)?;
 				let mut is_found_judgement = false;
@@ -225,8 +190,13 @@ decl_module! {
 			ensure!(logo.len() > 0, Error::<T>::InvalidParam);
 			ensure!(description.len() > 0, Error::<T>::InvalidParam);
 			ensure!(website.len() > 0, Error::<T>::InvalidParam);
+
+			ensure!(name.len() <= MAX_STRING_FIELD_LENGTH, Error::<T>::ParamLimitExceed);
+			ensure!(logo.len() <= MAX_STRING_FIELD_LENGTH, Error::<T>::ParamLimitExceed);
+			ensure!(description.len() <= MAX_STRING_FIELD_LENGTH, Error::<T>::ParamLimitExceed);
+			ensure!(website.len() <= MAX_STRING_FIELD_LENGTH, Error::<T>::ParamLimitExceed);
 			
-			let index = ProjectCount::get();
+			let index = ProjectCount::<T>::get();
 			let next_index = index.checked_add(1).ok_or(Error::<T>::Overflow)?;
 
 			// Create a grant 
@@ -236,19 +206,21 @@ decl_module! {
 				description: description,
 				website: website,
 				owner: who,
-				create_block_number: <frame_system::Module<T>>::block_number(),
+				create_block_number: <frame_system::Pallet<T>>::block_number(),
 			};
 
 			// Add grant to list
-			<Projects<T>>::insert(index, project);
-			ProjectCount::put(next_index);
+			<Projects<T>>::insert(index, Some(project));
+			ProjectCount::<T>::put(next_index);
 
-			Self::deposit_event(RawEvent::ProjectCreated(index));
+			Self::deposit_event(Event::ProjectCreated(index));
+
+			Ok(().into())
 		}
 
 		/// Funding to matching fund pool
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn fund(origin, fund_balance: BalanceOf<T>) {
+		#[pallet::weight(<T as Config>::WeightInfo::fund())]
+		pub fn fund(origin: OriginFor<T>, fund_balance: BalanceOf<T>) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 			ensure!(fund_balance > (0 as u32).into(), Error::<T>::InvalidParam);
 
@@ -262,15 +234,17 @@ decl_module! {
 				ExistenceRequirement::AllowDeath,
 			)?);
 
-			Self::deposit_event(RawEvent::FundSucceed());
+			Self::deposit_event(Event::FundSucceed());
+
+			Ok(().into())
 		}
 
 		/// Schedule a round
 		/// grant_indexes: the grants were selected for this round
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(4,3)]
-		pub fn schedule_round(origin, start: T::BlockNumber, end: T::BlockNumber, matching_fund: BalanceOf<T>, project_indexes: Vec<ProjectIndex>) {
+		#[pallet::weight(<T as Config>::WeightInfo::schedule_round(MaxGrantCountPerRound::<T>::get()))]
+		pub fn schedule_round(origin: OriginFor<T>, start: T::BlockNumber, end: T::BlockNumber, matching_fund: BalanceOf<T>, project_indexes: Vec<ProjectIndex>) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 
 			// Check whether the funds are sufficient
 			let used_fund = Self::get_used_fund();
@@ -280,7 +254,7 @@ decl_module! {
 
 			ensure!(project_indexes.len() > 0, Error::<T>::InvalidProjectIndexes);
 			// The number of items cannot exceed the maximum
-			ensure!(project_indexes.len() <= MaxGrantCountPerRound::get().try_into().unwrap(), Error::<T>::GrantAmountExceed);
+			ensure!(project_indexes.len() as u32 <= MaxGrantCountPerRound::<T>::get(), Error::<T>::GrantAmountExceed);
 			// The end block must be greater than the start block
 			ensure!(end > start, Error::<T>::EndTooEarly);
 			// Both the starting block number and the ending block number must be greater than the current number of blocks
@@ -288,14 +262,14 @@ decl_module! {
 			ensure!(end > now, Error::<T>::EndBlockNumberInvalid);
 
 			// project_index should be smaller than project count
-			let project_count = ProjectCount::get();
+			let project_count = ProjectCount::<T>::get();
 			for project_index in project_indexes.iter() {
 				ensure!(*project_index < project_count, Error::<T>::InvalidProjectIndexes);
 			}
 
 			// Find the last valid round
 			let mut last_valid_round: Option<RoundOf::<T>> = None;
-			let index = RoundCount::get();
+			let index = RoundCount::<T>::get();
 			for _i in (0..index).rev() {
 				let round = <Rounds<T>>::get(index-1).unwrap();
 				if !round.is_canceled {
@@ -317,19 +291,21 @@ decl_module! {
 			let round = RoundOf::<T>::new(start, end, matching_fund, project_indexes);
 
 			// Add grant round to list
-			<Rounds<T>>::insert(index, round);
-			RoundCount::put(next_index);
+			<Rounds<T>>::insert(index, Some(round));
+			RoundCount::<T>::put(next_index);
 
-			Self::deposit_event(RawEvent::RoundCreated(index));
+			Self::deposit_event(Event::RoundCreated(index));
+
+			Ok(().into())
 		}
 
 		/// Cancel a round
 		/// This round must have not started yet
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(3,2)]
-		pub fn cancel_round(origin, round_index: RoundIndex) {
+		#[pallet::weight(<T as Config>::WeightInfo::cancel_round())]
+		pub fn cancel_round(origin: OriginFor<T>, round_index: RoundIndex) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
-			let now = <frame_system::Module<T>>::block_number();
-			let count = RoundCount::get();
+			let now = <frame_system::Pallet<T>>::block_number();
+			let count = RoundCount::<T>::get();
 			let mut round = <Rounds<T>>::get(round_index).ok_or(Error::<T>::NoActiveRound)?;
 
 			// Ensure current round is not started
@@ -338,16 +314,18 @@ decl_module! {
 			ensure!(!round.is_canceled, Error::<T>::RoundCanceled);
 
 			round.is_canceled = true;
-			<Rounds<T>>::insert(round_index, round.clone());
+			<Rounds<T>>::insert(round_index, Some(round.clone()));
 
-			Self::deposit_event(RawEvent::RoundCanceled(count-1));
+			Self::deposit_event(Event::RoundCanceled(count-1));
+
+			Ok(().into())
 		}
 
 		/// Finalize a round
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn finalize_round(origin, round_index: RoundIndex) {
+		#[pallet::weight(<T as Config>::WeightInfo::finalize_round())]
+		pub fn finalize_round(origin: OriginFor<T>, round_index: RoundIndex) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 			let mut round = <Rounds<T>>::get(round_index).ok_or(Error::<T>::NoActiveRound)?;
 			
 			// This round cannot be cancelled or finalized
@@ -396,22 +374,24 @@ decl_module! {
 			}
 
 			round.is_finalized = true;
-			<Rounds<T>>::insert(round_index, round.clone());
+			<Rounds<T>>::insert(round_index, Some(round.clone()));
 
-			Self::deposit_event(RawEvent::RoundFinalized(round_index));
+			Self::deposit_event(Event::RoundFinalized(round_index));
+
+			Ok(().into())
 		}
 
 		/// Contribute a grant
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(2,1)]
-		pub fn contribute(origin, project_index: ProjectIndex, value: BalanceOf<T>) {
+		#[pallet::weight(<T as Config>::WeightInfo::contribute())]
+		pub fn contribute(origin: OriginFor<T>, project_index: ProjectIndex, value: BalanceOf<T>) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 			ensure!(value > (0 as u32).into(), Error::<T>::InvalidParam);
-			let project_count = ProjectCount::get();
+			let project_count = ProjectCount::<T>::get();
 			ensure!(project_index < project_count, Error::<T>::InvalidParam);
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 			
 			// round list must be not none
-			let round_index = RoundCount::get();
+			let round_index = RoundCount::<T>::get();
 			ensure!(round_index > 0, Error::<T>::NoActiveRound);
 
 			// Find processing round
@@ -467,15 +447,17 @@ decl_module! {
 				ExistenceRequirement::AllowDeath
 			)?;
 			
-			<Rounds<T>>::insert(round_index-1, round);
+			<Rounds<T>>::insert(round_index-1, Some(round));
 
-			Self::deposit_event(RawEvent::ContributeSucceed(who, project_index, value, now));
+			Self::deposit_event(Event::ContributeSucceed(who, project_index, value, now));
+
+			Ok(().into())
 		}
 
 		/// Approve project
 		/// If the project is approve, the project owner can withdraw funds
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(2,1)]
-		pub fn approve(origin, round_index: RoundIndex, project_index: ProjectIndex) {
+		#[pallet::weight(<T as Config>::WeightInfo::approve())]
+		pub fn approve(origin: OriginFor<T>, round_index: RoundIndex, project_index: ProjectIndex) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
 			let mut round = <Rounds<T>>::get(round_index).ok_or(Error::<T>::NoActiveRound)?;
 			ensure!(round.is_finalized, Error::<T>::RoundNotFinalized);
@@ -483,7 +465,7 @@ decl_module! {
 			let grants = &mut round.grants;
 
 			// The round must have ended
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 			// This round must be over
 			ensure!(round.end < now, Error::<T>::RoundNotEnded);
 
@@ -505,16 +487,18 @@ decl_module! {
 			grant.is_approved = true;
 			grant.withdrawal_expiration = now + <WithdrawalExpiration<T>>::get();
 
-			<Rounds<T>>::insert(round_index, round.clone());
+			<Rounds<T>>::insert(round_index, Some(round.clone()));
 
-			Self::deposit_event(RawEvent::GrantApproved(round_index, project_index));
+			Self::deposit_event(Event::GrantApproved(round_index, project_index));
+			
+			Ok(().into())
 		}
 
 		/// Withdraw
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(3,1)]
-		pub fn withdraw(origin, round_index: RoundIndex, project_index: ProjectIndex) {
+		#[pallet::weight(<T as Config>::WeightInfo::withdraw())]
+		pub fn withdraw(origin: OriginFor<T>, round_index: RoundIndex, project_index: ProjectIndex) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
-			let now = <frame_system::Module<T>>::block_number();
+			let now = <frame_system::Pallet<T>>::block_number();
 
 			// Only project owner can withdraw
 			let project = Projects::<T>::get(project_index).ok_or(Error::<T>::NoActiveGrant)?;
@@ -567,15 +551,17 @@ decl_module! {
 			grant.is_withdrawn = true;
 			grant.withdrawal_expiration = now + <WithdrawalExpiration<T>>::get();
 
-			<Rounds<T>>::insert(round_index, round.clone());
+			<Rounds<T>>::insert(round_index, Some(round.clone()));
 
-			Self::deposit_event(RawEvent::GrantWithdrawn(round_index, project_index, matching_fund, contribution_amount));
+			Self::deposit_event(Event::GrantWithdrawn(round_index, project_index, matching_fund, contribution_amount));
+
+			Ok(().into())
 		}
 
 		/// Cancel a problematic project
 		/// If the project is cancelled, users cannot donate to it, and project owner cannot withdraw funds.
-		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn cancel(origin, round_index: RoundIndex, project_index: ProjectIndex) {
+		#[pallet::weight(<T as Config>::WeightInfo::cancel())]
+		pub fn cancel(origin: OriginFor<T>, round_index: RoundIndex, project_index: ProjectIndex) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
 
 			let mut round = <Rounds<T>>::get(round_index).ok_or(Error::<T>::NoActiveRound)?;
@@ -604,52 +590,60 @@ decl_module! {
 
 			grant.is_canceled = true;
 
-			<Rounds<T>>::insert(round_index, round);
+			Rounds::<T>::insert(round_index, Some(round));
 
-			Self::deposit_event(RawEvent::GrantCanceled(round_index, project_index));
+			Self::deposit_event(Event::GrantCanceled(round_index, project_index));
+
+			Ok(().into())
 		}
 
 		/// Set max grant count per round
-		#[weight = 10_000 + T::DbWeight::get().writes(1)]
-		pub fn set_max_grant_count_per_round(origin, max_grant_count_per_round: u32) {
+		#[pallet::weight(<T as Config>::WeightInfo::set_max_grant_count_per_round(T::MaxGrantsPerRound::get()))]
+		pub fn set_max_grant_count_per_round(origin: OriginFor<T>, max_grant_count_per_round: u32) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
-			ensure!(max_grant_count_per_round > 0, Error::<T>::InvalidParam);
-			MaxGrantCountPerRound::put(max_grant_count_per_round);
+			ensure!(max_grant_count_per_round > 0 || max_grant_count_per_round <= T::MaxGrantsPerRound::get(), Error::<T>::ParamLimitExceed);
+			MaxGrantCountPerRound::<T>::put(max_grant_count_per_round);
+
+			Ok(().into())
 		}
 
 		/// Set withdrawal expiration
-		#[weight = 10_000 + T::DbWeight::get().writes(1)]
-		pub fn set_withdrawal_expiration(origin, withdrawal_expiration: T::BlockNumber) {
+		#[pallet::weight(<T as Config>::WeightInfo::set_withdrawal_expiration())]
+		pub fn set_withdrawal_expiration(origin: OriginFor<T>, withdrawal_expiration: T::BlockNumber) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
 			ensure!(withdrawal_expiration > (0 as u32).into(), Error::<T>::InvalidParam);
 			<WithdrawalExpiration<T>>::put(withdrawal_expiration);
+
+			Ok(().into())
 		}
 
 		/// set is_identity_required
-		#[weight = 10_000 + T::DbWeight::get().writes(1)]
-		pub fn set_is_identity_required(origin, is_identity_required: bool) {
+		#[pallet::weight(<T as Config>::WeightInfo::set_is_identity_required())]
+		pub fn set_is_identity_required(origin: OriginFor<T>, is_identity_required: bool) -> DispatchResultWithPostInfo {
 			ensure_root(origin)?;
-			IsIdentityRequired::put(is_identity_required);
+			IsIdentityRequired::<T>::put(is_identity_required);
+
+			Ok(().into())
 		}
 	}
 }
 
-impl<T: Config> Module<T> {
+impl<T: Config> Pallet<T> {
 	/// The account ID of the fund pot.
 	///
 	/// This actually does computation. If you need to keep using it, then make sure you cache the
 	/// value and only call this once.
 	pub fn account_id() -> T::AccountId {
-		return T::ModuleId::get().into_account();
+		T::PalletId::get().into_account()
 	}
 
 	pub fn project_account_id(index: ProjectIndex) -> T::AccountId {
-		T::ModuleId::get().into_sub_account(index)
+		T::PalletId::get().into_sub_account(index)
 	}
 
 	/// Get all projects
 	pub fn get_projects() -> Vec<Project<AccountIdOf<T>, T::BlockNumber>> {
-		let len = ProjectCount::get();
+		let len = ProjectCount::<T>::get();
 		let mut projects: Vec<Project<AccountIdOf<T>, T::BlockNumber>> = Vec::new();
 		for i in 0..len {
 			let project = <Projects<T>>::get(i).unwrap();
@@ -660,9 +654,9 @@ impl<T: Config> Module<T> {
 
 	// Calculate used funds
 	pub fn get_used_fund() -> BalanceOf<T> {
-		let now = <frame_system::Module<T>>::block_number();
+		let now = <frame_system::Pallet<T>>::block_number();
 		let mut used_fund: BalanceOf<T> = (0 as u32).into();
-		let count = RoundCount::get();
+		let count = RoundCount::<T>::get();
 
 		for i in 0..count {
 			let round = <Rounds<T>>::get(i).unwrap();
@@ -698,3 +692,103 @@ impl<T: Config> Module<T> {
 		used_fund
 	}
 }
+
+pub type ProjectIndex = u32;
+pub type RoundIndex = u32;
+
+type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
+type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
+type ProjectOf<T> = Project<AccountIdOf<T>, <T as frame_system::Config>::BlockNumber>;
+type ContributionOf<T> = Contribution<AccountIdOf<T>, BalanceOf<T>>;
+type RoundOf<T> = Round<AccountIdOf<T>, BalanceOf<T>, <T as frame_system::Config>::BlockNumber>;
+type GrantOf<T> = Grant<AccountIdOf<T>, BalanceOf<T>, <T as frame_system::Config>::BlockNumber>;
+
+/// Round struct
+#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
+pub struct Round<AccountId, Balance, BlockNumber> {
+	start: BlockNumber,
+	end: BlockNumber,
+	matching_fund: Balance,
+	grants: Vec<Grant<AccountId, Balance, BlockNumber>>,
+	is_canceled: bool,
+	is_finalized: bool,
+}
+
+impl<AccountId, Balance: From<u32>, BlockNumber: From<u32>> Round<AccountId, Balance, BlockNumber> {
+		fn new(start: BlockNumber, end: BlockNumber, matching_fund: Balance, project_indexes: Vec<ProjectIndex>) -> Round<AccountId, Balance, BlockNumber> { 
+		let mut grant_round  = Round {
+			start: start,
+			end: end,
+			matching_fund: matching_fund,
+			grants: Vec::new(),
+			is_canceled: false,
+			is_finalized: false,
+		};
+
+		// Fill in the grants structure in advance
+		for project_index in project_indexes {
+			grant_round.grants.push(Grant {
+				project_index: project_index,
+				contributions: Vec::new(),
+				is_approved: false,
+				is_canceled: false,
+				is_withdrawn: false,
+				withdrawal_expiration: (0 as u32).into(),
+				matching_fund: (0 as u32).into(),
+			});
+		}
+
+		grant_round
+	}
+}
+// Grant in round
+#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
+pub struct Grant<AccountId, Balance, BlockNumber> {
+	project_index: ProjectIndex,
+	contributions: Vec<Contribution<AccountId, Balance>>,
+	is_approved: bool,
+	is_canceled: bool,
+	is_withdrawn: bool,
+	withdrawal_expiration: BlockNumber,
+	matching_fund: Balance,
+}
+
+/// The contribution users made to a grant project.
+#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
+pub struct Contribution<AccountId, Balance> {
+	account_id: AccountId,
+	value: Balance,
+}
+
+/// Project struct
+#[derive(Encode, Decode, Default, PartialEq, Eq, Clone, Debug)]
+pub struct Project<AccountId, BlockNumber> {
+	name: Vec<u8>,
+	logo: Vec<u8>,
+	description: Vec<u8>,
+	website: Vec<u8>,
+	/// The account that will receive the funds if the campaign is successful
+	owner: AccountId,
+	create_block_number: BlockNumber,
+}
+
+#[cfg(feature = "std")]
+impl<T: Config> GenesisConfig<T> {
+	/// Direct implementation of `GenesisBuild::build_storage`.
+	///
+	/// Kept in order not to break dependency.
+	pub fn build_storage(&self) -> Result<sp_runtime::Storage, String> {
+		<Self as GenesisBuild<T>>::build_storage(self)
+	}
+
+	/// Direct implementation of `GenesisBuild::assimilate_storage`.
+	///
+	/// Kept in order not to break dependency.
+	pub fn assimilate_storage(
+		&self,
+		storage: &mut sp_runtime::Storage
+	) -> Result<(), String> {
+		<Self as GenesisBuild<T>>::assimilate_storage(self, storage)
+	}
+}
+
